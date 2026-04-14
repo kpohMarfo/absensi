@@ -1,0 +1,33 @@
+name: presensi_leilem
+description: "Aplikasi Presensi QR Code SMP Kristen Leilem"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Library untuk Firebase (Data & Login)
+  firebase_core: ^2.24.2
+  firebase_auth: ^4.15.3
+  cloud_firestore: ^4.13.6
+  # Library untuk UI & Icon
+  google_fonts: ^6.1.0
+  font_awesome_flutter: ^10.6.0
+  # Library untuk Fitur Utama (Minggu 2)
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^3.5.2
+  provider: ^6.1.1
+  # Library untuk Laporan (Minggu 3)
+  pdf: ^3.10.7
+  printing: ^5.11.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
