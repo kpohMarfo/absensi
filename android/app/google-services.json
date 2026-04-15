@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "877945147020",
+    "project_id": "presensi-leilem",
+    "storage_bucket": "presensi-leilem.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:877945147020:android:91c792542fd3c6109f75a9",
+        "android_client_info": {
+          "package_name": "com.example.presensi_leilem"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA0-wNzSa16bEbMU1jFDaRX8_pZGwIsngM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
