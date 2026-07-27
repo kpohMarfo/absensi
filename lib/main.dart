@@ -3,16 +3,17 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart'; // Tambahan untuk upload file
-import 'package:image_picker/image_picker.dart'; // Tambahan untuk pilih gambar
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:geolocator/geolocator.dart'; // Library lokasi GPS
 import 'dart:math';
 import 'dart:async';
-import 'dart:io'; // Tambahan untuk File
+import 'dart:io';
 
 // ID unik aplikasi untuk database agar tidak tercampur dengan proyek lain
 const String appId = "presensi-leilem-shergio";
@@ -26,7 +27,6 @@ void main() async {
   try {
     await Firebase.initializeApp();
     final auth = FirebaseAuth.instance;
-    // Autentikasi anonim untuk akses cepat tanpa pendaftaran manual
     if (auth.currentUser == null) {
       await auth.signInAnonymously();
     }
@@ -86,7 +86,6 @@ class UserDataHelper {
     }, SetOptions(merge: true));
   }
 
-  // Fungsi untuk mengunggah foto ke Firebase Storage
   static Future<String> uploadProfilePhoto(String id, File imageFile) async {
     final storageRef = FirebaseStorage.instance
         .ref()
@@ -94,6 +93,32 @@ class UserDataHelper {
     
     await storageRef.putFile(imageFile);
     return await storageRef.getDownloadURL();
+  }
+}
+
+// --- HELPER UNTUK LOKASI GPS ---
+class LocationHelper {
+  static Future<Position> getCurrentLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      throw "Layanan Lokasi (GPS) HP Anda tidak aktif. Mohon aktifkan GPS terlebih dahulu.";
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        throw "Izin akses lokasi ditolak oleh pengguna.";
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      throw "Izin lokasi ditolak secara permanen. Mohon izinkan lewat Pengaturan HP Anda.";
+    }
+
+    return await Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.high,
+    );
   }
 }
 
@@ -294,7 +319,7 @@ class GuruDashboard extends StatelessWidget {
   }
 }
 
-// --- GENERATOR QR & ABSEN MANUAL (CHECKLIST) ---
+// --- GENERATOR QR DENGAN CATATAN KOORDINAT GURU & ABSEN MANUAL ---
 class QRGeneratorPage extends StatefulWidget {
   final String subjectId;
   final String subjectName;
@@ -306,9 +331,48 @@ class QRGeneratorPage extends StatefulWidget {
 
 class _QRGeneratorPageState extends State<QRGeneratorPage> {
   String qrData = "";
-  void _generateNewQR() {
-    int currentMinute = DateTime.now().millisecondsSinceEpoch ~/ 60000;
-    setState(() => qrData = "${widget.subjectId}_$currentMinute");
+  bool isLoadingLocation = false;
+  String locationStatus = "Mengambil Lokasi GPS Guru...";
+
+  // Memperbarui QR sekaligus mencatat posisi GPS Guru di Firestore
+  Future<void> _generateNewQR() async {
+    setState(() {
+      isLoadingLocation = true;
+      locationStatus = "Merekam Koordinat Guru...";
+    });
+
+    try {
+      Position position = await LocationHelper.getCurrentLocation();
+
+      // Simpan koordinat GPS Guru ke dokumen subjects
+      await FirebaseFirestore.instance
+          .collection('artifacts').doc(appId)
+          .collection('public').doc('data')
+          .collection('subjects').doc(widget.subjectId).update({
+        'latitude_guru': position.latitude,
+        'longitude_guru': position.longitude,
+        'last_location_update': FieldValue.serverTimestamp(),
+      });
+
+      int currentMinute = DateTime.now().millisecondsSinceEpoch ~/ 60000;
+      if (mounted) {
+        setState(() {
+          qrData = "${widget.subjectId}_$currentMinute";
+          locationStatus = "GPS Aktif (${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)})";
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Warning GPS: $e")));
+        setState(() {
+          locationStatus = "Gagal mendapatkan GPS Guru";
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => isLoadingLocation = false);
+      }
+    }
   }
 
   Future<void> _absenManual(String nis) async {
@@ -320,6 +384,7 @@ class _QRGeneratorPageState extends State<QRGeneratorPage> {
       'nis': nis,
       'tanggal': today,
       'jam': "${TimeOfDay.now().format(context)} (Manual)",
+      'metode_presensi': 'Manual Guru',
       'timestamp': FieldValue.serverTimestamp(),
     });
   }
@@ -337,9 +402,21 @@ class _QRGeneratorPageState extends State<QRGeneratorPage> {
       body: Column(
         children: [
           const SizedBox(height: 15),
-          QrImageView(data: qrData, size: 180),
+          if (isLoadingLocation)
+            const SizedBox(height: 180, child: Center(child: CircularProgressIndicator()))
+          else
+            QrImageView(data: qrData, size: 180),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.location_on, size: 14, color: Colors.blue),
+              const SizedBox(width: 4),
+              Text(locationStatus, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+            ],
+          ),
           const SizedBox(height: 10),
-          ElevatedButton.icon(onPressed: _generateNewQR, icon: const Icon(Icons.refresh), label: const Text('PERBARUI QR')),
+          ElevatedButton.icon(onPressed: _generateNewQR, icon: const Icon(Icons.refresh), label: const Text('PERBARUI QR & LOKASI')),
           const Divider(height: 30),
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16.0),
@@ -522,6 +599,7 @@ class SiswaRiwayatPage extends StatelessWidget {
             itemBuilder: (context, index) {
               var doc = myAttendance[index];
               final data = doc.data() as Map<String, dynamic>;
+              final String jarak = data.containsKey('jarak_meter') ? "${data['jarak_meter']} meter" : "Manual/N/A";
               
               return Card(
                 margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), 
@@ -534,6 +612,7 @@ class SiswaRiwayatPage extends StatelessWidget {
                     children: [
                       Text("Pengajar: ${data.containsKey('nama_guru') ? data['nama_guru'] : '-'}"),
                       Text("Waktu: ${data.containsKey('tanggal') ? data['tanggal'] : '-'} | ${data.containsKey('jam') ? data['jam'] : '-'}"),
+                      Text("Jarak Ke Guru: $jarak", style: const TextStyle(fontSize: 11, color: Colors.blueGrey)),
                     ],
                   )
                 )
@@ -561,19 +640,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _namaController = TextEditingController();
   bool _isUploading = false;
 
-  // Fungsi untuk memilih dan mengunggah gambar
   Future<void> _pickAndUploadImage(String currentNama) async {
     final ImagePicker picker = ImagePicker();
-    // Memilih sumber gambar (Galeri)
     final XFile? image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 50);
 
     if (image != null) {
       setState(() => _isUploading = true);
       try {
         File file = File(image.path);
-        // Unggah ke Storage dan dapatkan URL-nya
         String downloadUrl = await UserDataHelper.uploadProfilePhoto(widget.id, file);
-        // Simpan URL ke Firestore
         await UserDataHelper.updateUser(widget.id, currentNama, downloadUrl, widget.role);
         
         if (mounted) {
@@ -693,7 +768,7 @@ class SiswaProfilPage extends StatelessWidget {
   Widget build(BuildContext context) { return ProfileScreen(id: id, role: role, color: Colors.green); }
 }
 
-// --- MODUL SCANNER & LOGIKA VALIDASI QR ---
+// --- MODUL SCANNER & LOGIKA VALIDASI QR + GEOFENCING (4 LAPIS) ---
 class QRScannerPage extends StatefulWidget {
   final String nis;
   const QRScannerPage({super.key, required this.nis});
@@ -710,27 +785,53 @@ class _QRScannerPageState extends State<QRScannerPage> {
 
     try {
       List<String> parts = rawData.split('_');
-      if (parts.length != 2) throw "QR Code Tidak Valid";
+      if (parts.length != 2) throw "Format Kode QR Tidak Valid";
       String subjectId = parts[0];
       int qrMinute = int.parse(parts[1]);
       int currentMinute = DateTime.now().millisecondsSinceEpoch ~/ 60000;
       String today = DateTime.now().toString().split(' ')[0];
 
-      if ((currentMinute - qrMinute).abs() > 1) throw "QR Code sudah kadaluwarsa.";
+      // Lapis 1: Validasi Jendela Waktu (Max 60 Detik)
+      if ((currentMinute - qrMinute).abs() > 1) throw "QR Code sudah kadaluwarsa. Mohon minta guru perbarui QR.";
 
       var mapelDoc = await FirebaseFirestore.instance.collection('artifacts').doc(appId).collection('public').doc('data').collection('subjects').doc(subjectId).get();
       if (!mapelDoc.exists) throw "Informasi mata pelajaran tidak ditemukan.";
+      final mapelData = mapelDoc.data() as Map<String, dynamic>;
 
+      // Lapis 2: Validasi Geofencing Radius (Maksimal 50 Meter antara Guru & Siswa)
+      if (!mapelData.containsKey('latitude_guru') || mapelData['latitude_guru'] == null) {
+        throw "Guru belum mengaktifkan lokasi GPS saat membuat QR Code.";
+      }
+      
+      double latGuru = (mapelData['latitude_guru'] as num).toDouble();
+      double lngGuru = (mapelData['longitude_guru'] as num).toDouble();
+
+      // Ambil posisi GPS Siswa saat ini
+      Position studentPos = await LocationHelper.getCurrentLocation();
+
+      // Hitung jarak Haversine (dalam meter)
+      double distanceInMeters = Geolocator.distanceBetween(
+        latGuru,
+        lngGuru,
+        studentPos.latitude,
+        studentPos.longitude,
+      );
+
+      if (distanceInMeters > 50.0) {
+        throw "Presensi ditolak. Anda berada di luar radius kelas (${distanceInMeters.toStringAsFixed(1)} meter dari Guru). Maksimal toleransi radius adalah 50 meter.";
+      }
+
+      // Lapis 3: Validasi Enrollment Token (Harus terdaftar)
       var enrollments = await FirebaseFirestore.instance.collection('artifacts').doc(appId).collection('public').doc('data').collection('enrollments').get();
       bool isEnrolled = enrollments.docs.any((doc) => doc.get('nis') == widget.nis && doc.get('id_mapel') == subjectId);
       if (!isEnrolled) throw "Anda belum terdaftar di mata pelajaran ini.";
 
+      // Lapis 4: Anti-Duplikasi Harian
       var attendanceCheck = await FirebaseFirestore.instance.collection('artifacts').doc(appId).collection('public').doc('data').collection('attendance').get();
       bool alreadyAttended = attendanceCheck.docs.any((doc) => doc.get('id_mapel') == subjectId && doc.get('nis') == widget.nis && doc.get('tanggal') == today);
-      if (alreadyAttended) throw "Anda sudah melakukan presensi hari ini.";
+      if (alreadyAttended) throw "Anda sudah melakukan presensi pada mata pelajaran ini hari ini.";
 
-      final mapelData = mapelDoc.data() as Map<String, dynamic>;
-
+      // Simpan transaksi presensi beserta bukti audit koordinat lokasi
       await FirebaseFirestore.instance.collection('artifacts').doc(appId).collection('public').doc('data').collection('attendance').add({
         'id_mapel': subjectId,
         'nama_mapel': mapelData.containsKey('nama_mapel') ? mapelData['nama_mapel'] : "Tanpa Nama",
@@ -738,15 +839,33 @@ class _QRScannerPageState extends State<QRScannerPage> {
         'nis': widget.nis,
         'tanggal': today,
         'jam': TimeOfDay.now().format(context),
+        'latitude_siswa': studentPos.latitude,
+        'longitude_siswa': studentPos.longitude,
+        'jarak_meter': double.parse(distanceInMeters.toStringAsFixed(1)),
+        'metode_presensi': 'QR Code + GPS Geofencing',
         'timestamp': FieldValue.serverTimestamp(),
       });
 
       if (mounted) {
-        showDialog(context: context, builder: (c) => AlertDialog(title: const Text('Sukses!'), content: const Text('Kehadiran Anda berhasil dicatat.'), actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Selesai'))])).then((_) => Navigator.pop(context));
+        showDialog(
+          context: context, 
+          builder: (c) => AlertDialog(
+            title: const Text('Presensi Sah!'), 
+            content: Text('Kehadiran Anda berhasil dicatat.\nJarak Anda dengan Guru: ${distanceInMeters.toStringAsFixed(1)} meter.'), 
+            actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Selesai'))]
+          )
+        ).then((_) => Navigator.pop(context));
       }
     } catch (e) {
       if (mounted) {
-        showDialog(context: context, builder: (c) => AlertDialog(title: const Text('Gagal Presensi'), content: Text(e.toString()), actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Tutup'))])).then((_) => setState(() => isScanning = true));
+        showDialog(
+          context: context, 
+          builder: (c) => AlertDialog(
+            title: const Text('Gagal Presensi'), 
+            content: Text(e.toString()), 
+            actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Tutup'))]
+          )
+        ).then((_) => setState(() => isScanning = true));
       }
     }
   }
@@ -754,7 +873,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Scanner QR Guru')),
+      appBar: AppBar(title: const Text('Scanner QR Guru (Geofencing 50m)')),
       body: MobileScanner(onDetect: (capture) {
         final List<Barcode> barcodes = capture.barcodes;
         if (barcodes.isNotEmpty && barcodes.first.rawValue != null) {
@@ -778,7 +897,7 @@ class GuruLaporanPage extends StatelessWidget {
         .where('id_mapel', isEqualTo: subjectId)
         .get();
 
-    final List<List<String>> tableData = [['No', 'NIS Siswa', 'Tanggal', 'Waktu']];
+    final List<List<String>> tableData = [['No', 'NIS Siswa', 'Tanggal', 'Waktu', 'Jarak (m)', 'Metode']];
     for (var i = 0; i < attendanceQuery.docs.length; i++) {
       var doc = attendanceQuery.docs[i];
       final data = doc.data() as Map<String, dynamic>;
@@ -786,7 +905,9 @@ class GuruLaporanPage extends StatelessWidget {
         (i + 1).toString(), 
         data.containsKey('nis') ? data['nis'] : '-', 
         data.containsKey('tanggal') ? data['tanggal'] : '-', 
-        data.containsKey('jam') ? data['jam'] : '-'
+        data.containsKey('jam') ? data['jam'] : '-',
+        data.containsKey('jarak_meter') ? "${data['jarak_meter']} m" : 'Manual',
+        data.containsKey('metode_presensi') ? data['metode_presensi'] : 'QR'
       ]);
     }
 
@@ -796,7 +917,7 @@ class GuruLaporanPage extends StatelessWidget {
           return pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              pw.Header(level: 0, text: "LAPORAN KEHADIRAN SISWA"),
+              pw.Header(level: 0, text: "LAPORAN KEHADIRAN SISWA (GEOFENCING 50M)"),
               pw.Divider(),
               pw.SizedBox(height: 10),
               pw.Text("Sekolah: SMP Kristen Leilem"),
